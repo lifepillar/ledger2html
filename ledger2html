@@ -1,0 +1,553 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+
+# Copyright (c) 2013 Lifepillar
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+require 'shellwords'
+
+VERSION = '0.0.1'
+
+def debug title, *info
+  return unless $DEBUG
+  puts "\033[1;35m[DEBUG]\033[1;39m #{title}\033[0m"
+  info.each do |chunk|
+    chunk.each_line do |l|
+      puts "\033[1;35m[DEBUG]\033[0m #{l.chomp!}"
+    end
+  end
+end
+
+format = {
+  :pre => {
+    :balance => '<span class="amount">%(justify(scrub(display_total), 20, 20 + int(prepend_width), true, false))</span>' +
+      '  %(!options.flat ? depth_spacer : "")' +
+      '<span class="account">%-(partial_account(options.flat))</span>\n%/' +
+      '<span class="amount total">%$2</span>\n%/' +
+      '%(prepend_width ? " " * int(prepend_width) : "")' +
+      '--------------------\n',
+  
+    :budget => '<span class="amount">%(justify(scrub(get_at(display_total, 0)), 20, -1, true, false))</span>' +
+     ' <span class="amount">%(justify(get_at(display_total, 1) ? -scrub(get_at(display_total, 1)) : 0.0, 20, ' +
+      '           20 + 1 + 20, true, false))</span>' +
+      ' <span class="amount">%(justify(get_at(display_total, 1) ? (get_at(display_total, 0) ?' +
+      '           -(scrub(get_at(display_total, 1) + get_at(display_total, 0))) :' +
+      '           -(scrub(get_at(display_total, 1)))) : -(scrub(get_at(display_total, 0))), 20, ' +
+      '           20 + 1 + 20 + 1 + 20, true, false))</span>' +
+      '%(get_at(display_total, 1) and (abs(quantity(scrub(get_at(display_total, 0))) / ' +
+      '          quantity(scrub(get_at(display_total, 1)))) >= 1) ? ' +  
+      ' " <span class=\"perc improper\">" : " <span class=\"perc\">")' +
+      '%(justify((get_at(display_total, 1) ? ' +
+      '          (100% * (get_at(display_total, 0) ? scrub(get_at(display_total, 0)) : 0.0)) / ' +
+      '             -scrub(get_at(display_total, 1)) : "na"), ' +
+      '           5, -1, true, false))</span>' +
+      '  %(!options.flat ? depth_spacer : "")' +
+      '<span class="account">%-(partial_account(options.flat))</span>\n' +
+      '%/<span class="amount total">%$2</span> <span class="amount total">%$3</span>' +
+      ' <span class="amount total">%$4</span> <span class="perc total">%$6</span>\n%/' +
+      '%(prepend_width ? " " * int(prepend_width) : "")' +
+      '    ----------------     ----------------     ---------------- -----\n',
+  
+    :cleared => '<span class="amount">%(justify(scrub(get_at(display_total, 0)), 20, 20 + int(prepend_width), ' +
+      ' true, false))</span>  <span class="amount">%(justify(scrub(get_at(display_total, 1)), 20, ' +
+      ' 42 + int(prepend_width), true, false))</span>' +
+      '    %(latest_cleared ? "<span class=\"date\">" + format_date(latest_cleared) + "</span>" : "         ")' +
+      '    %(!options.flat ? depth_spacer : "")' +
+      '<span class="account">%-(partial_account(options.flat))</span>\n%/' +
+      '<span class="amount total">%$2</span>  <span class="amount total">%$3</span>' +
+      '    %$4\n%/' +
+      '%(prepend_width ? " " * int(prepend_width) : "")' +
+      '--------------------  --------------------    ---------\n',
+
+    :register => '%(date > today ? "<span class=\"future date\">" : "<span class=\"date\">")' +
+      '%(justify(format_date(date), int(date_width)))</span>' +
+      ' %(!cleared and actual ? "<span class=\"pending payee\">" : "<span class=\"payee\">")' +
+      '%(justify(truncated(payee, int(payee_width)), int(payee_width)))</span>' +
+      ' <span class="account">%(justify(truncated(display_account, int(account_width),' +
+      '                               int(abbrev_len)), int(account_width)))</span>' +
+      ' <span class="amount">%(justify(scrub(display_amount), int(amount_width),' +
+      '           3 + int(meta_width) + int(date_width) + int(payee_width)' +
+      '             + int(account_width) + int(amount_width) + int(prepend_width),' +
+      '           true, false))</span>' +
+      ' <span class="amount">%(justify(scrub(display_total), int(total_width),' +
+      '            4 + int(meta_width) + int(date_width) + int(payee_width)' +
+      '             + int(account_width) + int(amount_width) + int(total_width)' +
+      '             + int(prepend_width), true, false))</span>' +
+      '\n%/' +
+      '%(justify(" ", int(date_width)))' +
+      ' %(justify(truncated(has_tag("Payee") ? "<span class=\"payee\">" + payee + "</span>" : " ", ' +
+      '                     int(payee_width)), int(payee_width)))' +
+      ' <span class="account">%$4</span>' +
+      '  <span class="amount">%$6</span>' +
+      ' <span class="amount">%$7</span>\n',
+  
+    :register_dc => '%(date > today ? "<span class=\"future date\">" : "<span class=\"date\">")' +
+      '%(justify(format_date(date), int(date_width)))</span>' +
+      '%(!cleared and actual ? "<span class=\"pending payee\">" : "<span class=\"payee\">")' +
+      ' %(justify(truncated(payee, int(payee_width)), int(payee_width)))</span>' +
+      ' <span class="account">%(justify(truncated(display_account, int(account_width),' +
+      '                               int(abbrev_len)), int(account_width)))</span>' +
+      ' <span class="amount">%(justify(get_at(display_amount, 0) ? scrub(abs(get_at(display_amount, 0))) : 0.0, int(amount_width), ' +
+      '           3 + int(meta_width) + int(date_width) + int(payee_width)' +
+      '           + int(account_width) + int(amount_width) + int(prepend_width),' +
+      '           true, color))</span>' +
+      ' <span class="amount">%(justify(get_at(display_amount, 1) ? scrub(abs(get_at(display_amount, 1))) : 0.0, int(amount_width), ' +
+      '           4 + int(meta_width) + int(date_width) + int(payee_width)' +
+      '             + int(account_width) + int(amount_width) + int(amount_width) + int(prepend_width),' +
+      '           true, color))</span>' +
+      '   <span class="amount total">%(justify(scrub(get_at(display_total, 0) ? (get_at(display_total, 1) ? get_at(display_total, 0) + get_at(display_total, 1) : get_at(display_total, 0)) : get_at(display_total, 1)), int(total_width), ' +
+      '           5 + int(meta_width) + int(date_width) + int(payee_width)' +
+      '            + int(account_width) + int(amount_width) + int(amount_width) + int(total_width)' +
+      '             + int(prepend_width), true, color))</span>' +
+      '\n%/' +
+      '%(justify(" ", int(date_width)))' +
+      '   %(justify(truncated(has_tag("Payee") ? "<span class=\"payee\">" + payee + "</span>" : " ", ' +
+      '                     int(payee_width)), int(payee_width)))' +
+      '%$5 %$6 %$7 %$8\n'
+  },
+
+  :table => {
+    :balance => '<tr><td class="amount">%(scrub(display_total))</td>' +
+      '<td class="account">%(!options.flat ? depth_spacer : "")%(partial_account(options.flat))</td></tr>%/' +
+      '<tr class="total"><td class="amount total">%$2</td><td></td></tr>%/',
+
+    :budget => '<tr><td class="amount">%(get_at(display_total, 0))</td>' +
+      '<td class="amount">%(get_at(display_total, 1) ? -scrub(get_at(display_total, 1)) : 0.0)</td>' +
+      '<td class="amount">%(get_at(display_total, 1) ? (get_at(display_total, 0) ? -(get_at(display_total, 1) + get_at(display_total, 0)) : -(scrub(get_at(display_total, 1)))) : -(scrub(get_at(display_total, 0))))</td>' +
+      '%(get_at(display_total, 1) and (abs(quantity(scrub(get_at(display_total, 0))) / ' +
+      'quantity(scrub(get_at(display_total, 1)))) >= 1) ? ' +  
+      '"<td class=\"perc improper\">" : "<td class=\"perc\">")' +
+      '%(get_at(display_total, 1) ? ' +
+      '          (100% * (get_at(display_total, 0) ? scrub(get_at(display_total, 0)) : 0.0)) / ' +
+      '             -scrub(get_at(display_total, 1)) : "na")</td>' +
+      '<td class="account">%(!options.flat ? depth_spacer : "")%-(partial_account(options.flat))</td>' +
+      '</tr>\n%/' +
+      '<tr class="total"><td class="amount total">%$2</td><td class="amount total">%$3</td>' +
+      '<td class="amount total">%$4</td> <td class="perc total">%$6</td><td class="total"></td></tr>\n%/',
+
+
+    :cleared => '<tr><td class="amount">%(scrub(get_at(display_total, 0)))</td>' +
+      '<td class="amount">%(scrub(get_at(display_total, 1)))</td>' +
+      '%(latest_cleared ? "<td class=\"date\">" + format_date(latest_cleared) + "</td>" : "<td></td>")' +
+      '<td class="account">%(!options.flat ? depth_spacer : "")%-(partial_account(options.flat))</td></tr>\n%/' +
+      '<tr class="total"><td class="amount total">%$2</td><td class="amount total">%$3</td>' +
+      '<td>%$4</td></tr>\n%/',
+
+    :register_dc => '<tr><td><input name="status" value="" type="checkbox"></td>' +
+      '%(date > today ? "<td class=\"future date\">" : "<td class=\"date\">")%(format_date(date))</td>' +
+      '%(!cleared and actual ? "<td class=\"pending payee\">" : "<td class=\"payee\">")%(payee)</td>' +
+      '<td class="account">%(display_account)</td>' +
+      '<td class="amount">%(get_at(display_amount, 0) ? scrub(abs(get_at(display_amount, 0))) : 0.0)</td>' +
+      '<td class="amount">%(get_at(display_amount, 1) ? scrub(abs(get_at(display_amount, 1))) : 0.0)</td>' +
+      '<td class="amount total">%(scrub(get_at(display_total, 0) ? (get_at(display_total, 1) ? get_at(display_total, 0) + get_at(display_total, 1) : get_at(display_total, 0)) : get_at(display_total, 1)))</td>' +
+      '</tr>\n%/' +
+      '<tr><td></td><td></td>' +
+      '%(has_tag("Payee") ? "<td class=\"payee\">" + payee + "</td>" : "<td></td>")' +
+      '<td class="account">%$6</td><td class="amount">%$7</td><td class="amount">%$8</td><td class="amount total">%$9</td></tr>\n',
+
+    :balance_dc => '<tr><td class="amount">%(get_at(display_total, 0) ? scrub(abs(get_at(display_total, 0))) : 0.0)</td>' +
+      '<td class="amount">%(get_at(display_total, 1) ? scrub(abs(get_at(display_total, 1))) : 0.0)</td>' +
+      '<td class="amount partial">%(scrub(get_at(display_total, 0) ? (get_at(display_total, 1) ? get_at(display_total, 0) + get_at(display_total, 1) : get_at(display_total, 0)) : get_at(display_total, 1)))</td>' +
+      '<td class="account">%(!options.flat ? depth_spacer : "")%(partial_account(options.flat))</td></tr>%/' +
+      '</tr>\n%/' +
+      '<tr><td class="amount total">%$2</td><td class="amount total">%$3</td><td class="amount total">%$4</td><td></td></tr>\n',
+
+    :register => '%(!cleared and actual ? "<tr class=\"first-posting pending\">" : "<tr class=\"first-posting\">")' +
+      '<td><input name="status" value="" type="checkbox"></td>' +
+      '%(date > today ? "<td class=\"future date\">" : "<td class=\"date\">")%(format_date(date))</td>' +
+      '<td class="payee">%(payee)</td>' +
+      '<td class="account">%(display_account)</td>' +
+      '<td class="amount">%(scrub(display_amount))</td>' +
+      '<td class="amount">%(scrub(display_total))</td>' +
+      '</tr>%/' +
+      '<tr><td></td><td></td>' +
+      '%(has_tag("Payee") ? "<td class=\"payee\">" + payee + "</td>" : "<td></td>")' +
+      '<td class="account">%$5</td>' +
+      '<td class="amount">%$6</td>' +
+      '<td class="amount">%$7</td>' +
+      '</tr>',
+
+    # In periodic reports, such as monthly expenses, Ledger uses the payee to store the end date of a period.
+    :periodic => '<tr class="first-period">%(date > today ? "<td class=\"future date period\">" : "<td class=\"date period\">")%(format_date(date))' +
+      ' %(payee)</td>' +
+      '<td class="account">%(display_account)</td>' +
+      '<td class="amount">%(scrub(display_amount))</td>' +
+      '<td class="amount">%(scrub(display_total))</td>' +
+      '</tr>\n%/' +
+      '<tr>%(has_tag("Payee") ? "<td class=\"payee\">" + payee + "</td>" : "<td></td>")' +
+      '<td class="account">%$5</td>' +
+      '<td class="amount">%$6</td>' +
+      '<td class="amount">%$7</td>' +
+      '</tr>\n'
+  }
+}
+
+module Html5
+
+  # Turns a set of key-value pairs into a string of html attributes.
+  # For example, { :class => ['foo','baz'], :id => 'abc'} is translated into
+  # ' class="foo baz" id="abc"'.
+  def self.attributes hash
+    return '' if hash.nil?
+    s = ''
+    hash.each_pair do |k,v|
+      unless v.nil? or v.empty?
+        s << " #{k.to_s}=\"#{v.instance_of?(String) ? v : v.join(' ')}\""
+      end
+    end
+    return s
+  end
+
+  class Page
+
+    attr :title
+
+    def initialize title, options = {}
+      @title = title
+      @attrs = { :class => [], :id => '', :css => [] }.merge!(options)
+      @css = Array.new(@attrs[:css])
+      @attrs.delete(:css)
+      @snippets = []
+    end
+
+    def << snippet
+      if snippet.instance_of?(String)
+        @snippets << Html5::Snippet.new(nil, snippet)
+      else
+        @snippets << snippet
+      end
+      return self
+    end
+
+    # Returns the last added snippet.
+    def last_snippet
+      @snippets.last
+    end
+
+    def to_s
+      c = start_html
+      @snippets.each { |s| c << s.to_s }
+      c << end_html
+      return c
+    end
+
+    def save path
+      File.open(path, "w").write(self.to_s)
+    end
+
+    def start_html
+      attrs = Html5.attributes(@attrs)
+      return "<!DOCTYPE html>\n<html>\n" + header + "<body#{attrs}>\n"
+    end
+
+    def end_html
+      "</body>\n</html>\n"
+    end
+
+    def header
+      "<head>\n<meta charset=\"UTF-8\">\n<title>#{title}</title>\n#{css}</head>\n"
+    end
+
+    def css
+      return '' if @css.empty?
+      style = "<style>\n"
+      @css.each do |ss|
+        style << File.open(ss, 'r').read
+      end
+      style << "</style>\n"
+      return style
+    end
+
+  end # class Page
+
+  class Snippet
+    
+    # Creates a new html snippet. The content can be a single string or snippet,
+    # or a list of strings/snippets.
+    #
+    # Example:
+    #
+    #   sect = Snippet.new('section', '<h2>Title</h2><p>Blah blah</p>', :class => 'foo')
+    def initialize tag, content, attrs = {}
+      @tag = tag
+      if content.nil?
+        @content = []
+      elsif content.instance_of?(Array)
+        @content = content
+      else
+        @content = [content]
+      end
+      @attrs = attrs
+    end
+
+    def << snippet
+      @content << snippet
+    end
+
+    def to_s
+      s = ''
+      s << '<' + @tag + Html5.attributes(@attrs) + ">\n" unless @tag.nil?
+      @content.each do |c|
+          s << c.to_s
+      end
+      s << '</' + @tag + ">\n" unless @tag.nil?
+      return s
+    end
+
+  end # class Snippet
+
+  class Svg
+
+    @@unique_id = 100000
+
+    attr :id
+    attr :name
+
+    def initialize path
+      @xml = File.open(path, 'r').read
+      @name = File.basename(path, '.svg')
+      @id = @name.downcase.gsub(/\s/,'-')
+    end
+
+    # Returns code suitable to be embedded into an HTML5 page.
+    def to_s
+      # Make xlink:hrefs unique across all the SVG images generated in one run.
+      ideez =[]
+      # 1) Collect all id's
+      @xml.scan(/id\s*=\s*"(.+?)"/) do |match|
+        ideez << match[0]
+      end
+      # 2) For each id, replace all of its occurrences with a new, unique, id
+      ideez.each do |id|
+        @xml.gsub!(/#{id}/, @@unique_id.to_s)
+        @@unique_id += 1
+      end
+      @xml.gsub!(/^\s*<\?xml.*?\?>\n?/,'')
+      @xml.sub!(/width=".+?"/, 'width="100%"')
+      # Apparently, there is a bug in Safari 6 and in some versions of Chrome preventing labels
+      # to be displayed when SVG images are inlined in HTML5 documents. The problem resides in the <use> tag.
+      # See for example:
+      #
+      # http://stackoverflow.com/questions/12686247/safari-6-svg-tag-use-issues
+      # http://stackoverflow.com/questions/11514248/svg-use-elements-in-chrome-not-displayed
+      #
+      # The last link described a workaround: instead of <use ... />, write <use ...></use>.
+      # This is what we do here:
+      @xml.gsub!(/<use(.+?)\/>/) { |m| '<use' + $1 + '></use>' }
+      return @xml
+    end
+
+  end # class Svg
+
+end # end module Html5
+
+
+# Runs the report and returns the result as an HTML document.
+def run arguments, options = {}
+  opts = { :wrapper => :table }.merge!(options)
+  @warnings = []
+  command = "ledger #{arguments.shelljoin}"
+  debug command
+  output = %x|#{command}|
+  unless $?.success?
+    puts "\nLedger command failed."
+    exit(1)
+  end
+  # Clean up
+  output.gsub!(/<(Total|Unspecified payee|Revalued|Adjustment|None)>/) { |m| '&lt;' + $1 + '&gt;' }
+  output = output.gsub(/class="[^"]*?amount.*?".*?<\//m) do |match|
+    match.gsub(/(-\d+([,\.]\d+)*)/) do |amount|
+      '<span class="neg">' + $1 + '</span>'
+    end
+  end
+  attrs = {}
+  attrs[:id] = opts[:id] if opts[:id]
+  attrs[:class] = opts[:class] if opts[:class]
+  container = Html5::Snippet.new('section', nil, attrs)
+  container << "<h1>#{options[:title]}</h1>\n"
+  content = Html5::Snippet.new(opts[:wrapper].to_s, nil)
+  if opts[:header] and :table == opts[:wrapper]
+    header = "<thead>\n<tr>\n"
+    opts[:header].each do |h|
+      header << "<th scope=\"col\" class=\"header-#{h.downcase.gsub(/\s/,'-')}\">#{h}</th>\n"
+    end
+    header << "</tr>\n</thead>\n"
+    content << header
+  end
+  content << output
+  container << content
+  footer = Html5::Snippet.new('footer', nil)
+  unless @warnings.empty?
+    warnings = Html5::Snippet.new('ul', nil, :class => 'warnings')
+    @warnings.each { |w| warnings << Html5::Snippet.new('li', w) }
+    footer << warnings
+  end
+  command.gsub!(/</, '&lt;')
+  command.gsub!(/>/, '&gt;')
+  footer << Html5::Snippet.new('pre', command, :class => 'ledger-command')
+  container << footer
+  html = Html5::Page.new(options[:title], :css => options[:css])
+  html << container
+  return html
+end
+
+def help; <<-HELP
+Usage: ledger2html <options> <ledger options>
+Options:
+    -h, --help                       Show this help message and exit.
+    -o, --output  <path>             Save the report to a file.
+        --pre                        Use <pre> instead of <table> to wrap Ledger's output.
+        --style   <path>             Path to a CSS file (this option can be used multiple times).
+        --title   <title>            Title of the report.
+        --version                    Print ledger2html version and exit.
+        --debug                      Enable debugging.
+
+Example:
+    ledger2html --title 'Balance Report' --style css/default.css bal ^assets ^liab
+HELP
+end
+
+# Parse options
+report_type = nil
+outfile = nil
+debit_credit = false
+last_col = 'Balance' # Title for the last column in register and periodic reports
+styles = []
+arguments = []
+options = { :css => [], :wrapper => :table, :title => 'Report' }
+n = ARGV.length
+i = 0
+while i < n
+  case ARGV[i]
+  when /^--debug$/
+    $DEBUG = true
+  when /^-h|--help$/
+    puts help
+    exit(0)    
+  when /^-o|--output$/
+    i += 1
+    if i < n
+      outfile = ARGV[i]
+    else
+      puts 'Please specify the output file.'
+      exit(1)
+    end
+  when /^--pre$/
+    options[:wrapper] = :pre
+  when /^--style$/
+    i += 1
+    if i < n
+      options[:css] << ARGV[i]
+    else
+      puts '--style requires an argument.'
+      exit(1)
+    end
+  when /^--title$/
+    i += 1
+    if i < n
+      options[:title] = ARGV[i]
+    else
+      puts '--title requires an argument.'
+      exit(1)
+    end
+  when /^--version$/
+    puts VERSION
+    exit(0)
+  when /^b(al(ance)?)?$/
+    report_type = debit_credit ? :balance_dc : :balance
+    arguments << ARGV[i]
+  when /^cleared$/
+    report_type = :cleared
+    arguments << ARGV[i]
+  when /^reg(ister)?$/
+    report_type = debit_credit ? :register_dc : :register
+    arguments << ARGV[i]
+  when /^budget$/
+    report_type = :budget
+    arguments << ARGV[i]
+  when /^--dc$/
+    debit_credit = true
+    if :balance == report_type
+      report_type = :balance_dc
+    elsif :register == report_type
+      report_type = :register_dc
+    end        
+    arguments << ARGV[i]
+  when /^--(dai|week|month|quarter|year)ly$/
+    report_type = :periodic
+    arguments << ARGV[i]
+  when /^-A|--average$/
+    last_col = 'Average'
+    arguments << ARGV[i]
+  when /^--deviation$/
+    last_col = 'Deviation'
+    arguments << ARGV[i]
+  when /^-F|--format|--balance-format|--register-format$/
+    i += 1 # skip format options
+  else # Pass to Ledger as is
+    arguments << ARGV[i]
+  end
+  i += 1
+end
+
+unless report_type
+  puts 'Sorry, the only supported report commands are:'
+  puts 'balance, budget, cleared, register'
+  exit(1)
+end
+
+case report_type
+when :balance
+  options[:class] = 'balance-report'
+  arguments << '-F' << format[options[:wrapper]][:balance]
+when :cleared
+  options[:class] = ['balance-report', 'cleared-report']
+  options[:header] = ['Pending', 'Cleared']
+  arguments << '-F' << format[options[:wrapper]][:cleared]
+when :register
+  options[:class] = 'register-report'
+  options[:header] = ['','Date','Payee','Account','Amount','Balance']
+  arguments << '-F' << format[options[:wrapper]][:register]
+when :budget
+  options[:class] = 'budget-report'
+  options[:header] = ['Actual', 'Budgeted', 'Remaining', 'Used', 'Account']
+  arguments << '-F' << format[options[:wrapper]][:budget]
+when :balance_dc
+  options[:class] = ['balance-report', 'debit-credit-report']
+  options[:header] = ['Debit', 'Credit', 'Balance']
+  arguments << '-F' << format[options[:wrapper]][:balance_dc]
+when :register_dc
+  options[:class] = ['register-report', 'debit-credit-report']
+  options[:header] = ['', 'Date', 'Payee', 'Account', 'Debit', 'Credit', last_col]
+  arguments << '-F' << format[options[:wrapper]][:register_dc]
+when :periodic
+  options[:class] = ['periodic-report']
+  options[:header] = ['Period','Account','Amount', last_col]
+  arguments << '-F' << format[options[:wrapper]][:periodic]
+end
+
+# Execute Ledger
+html = run(arguments, options)
+if outfile
+  html.save(outfile)
+  system("open -a Safari #{outfile}")
+else
+  print html.to_s
+end
