@@ -547,7 +547,6 @@ end
 html = run(arguments, options)
 if outfile
   html.save(outfile)
-  system("open -a Safari #{outfile}")
 else
   print html.to_s
 end
